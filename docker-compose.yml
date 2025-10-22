@@ -1,0 +1,198 @@
+# A base configuration for services that might need to communicate with multiple
+# docker compose projects on the same server.
+
+# To expose a service online, use the public-traefik network and add labels
+# To let a service be accessible in adminer use add the local-adminer network to your service
+# To let a service be accessible for backups use the local-backweb network
+
+# ENV VARIABLES REQUIRED
+# DOMAIN
+# TRAEFIK_USERNAME
+# TRAEFIK_HASHED_PASSWORD
+# TRAEFIK_EMAIL
+# BACKWEB_SECRET_KEY
+
+# Example labels, change <service> with your service name and <service_port> with your service port number ie: 8085
+    # labels:
+    #   - traefik.enable=true
+    #   - traefik.docker.network=public-traefik
+    #   - traefik.constraint-label=public-traefik
+    #   - traefik.http.services.{PROJECT_NAME}-<service>.loadbalancer.server.port=<service_port>
+    #   - traefik.http.routers.{PROJECT_NAME}-<service>-http.rule=Host(`<service>.${DOMAIN?Variable not set}`)
+    #   - traefik.http.routers.{PROJECT_NAME}-<service>-http.entrypoints=http
+    #   - traefik.http.routers.{PROJECT_NAME}-<service>-http.middlewares=https-redirect
+    #   - traefik.http.routers.{PROJECT_NAME}-<service>-https.rule=Host(`<service>.${DOMAIN?Variable not set}`)
+    #   - traefik.http.routers.{PROJECT_NAME}-<service>-https.entrypoints=https
+    #   - traefik.http.routers.{PROJECT_NAME}-<service>-https.tls=true
+    #   - traefik.http.routers.{PROJECT_NAME}-<service>-https.tls.certresolver=le
+
+
+networks:
+  public-traefik:
+    external: true
+    attachable: true
+    name: public-traefik
+
+  local-adminer:
+    external: true
+    attachable: true
+    name: local-adminer
+
+  local-backweb:
+    external: true
+    attachable: true
+    name: local-backweb
+
+
+volumes:
+  # Create a volume to store the certificates, even if the container is recreated
+  server-traefik-certificates:
+  # Create a volume to store the PostgreSQL data
+  server-pgdata:
+  # Create a volume to store the backups
+  server-backups:
+
+
+services:
+  traefik:
+    image: traefik:3.0
+    ports:
+      # Listen on port 80, default for HTTP, necessary to redirect to HTTPS
+      - 80:80
+      # Listen on port 443, default for HTTPS
+      - 443:443
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+    labels:
+      # Enable Traefik for this service, to make it available in the public network
+      - traefik.enable=true
+      # Use the public-traefik network (declared below)
+      - traefik.docker.network=public-traefik
+      # Define the port inside of the Docker service to use
+      - traefik.http.services.traefik-dashboard.loadbalancer.server.port=8080
+      # Make Traefik use this domain (from an environment variable) in HTTP
+      - traefik.http.routers.traefik-dashboard-http.entrypoints=http
+      - traefik.http.routers.traefik-dashboard-http.rule=Host(`traefik.${DOMAIN?Variable not set}`)
+      # traefik-https the actual router using HTTPS
+      - traefik.http.routers.traefik-dashboard-https.entrypoints=https
+      - traefik.http.routers.traefik-dashboard-https.rule=Host(`traefik.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.traefik-dashboard-https.tls=true
+      # Use the "le" (Let's Encrypt) resolver created below
+      - traefik.http.routers.traefik-dashboard-https.tls.certresolver=le
+      # Use the special Traefik service api@internal with the web UI/Dashboard
+      - traefik.http.routers.traefik-dashboard-https.service=api@internal
+      # https-redirect middleware to redirect HTTP to HTTPS
+      - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
+      # traefik-http set up only to use the middleware to redirect to https
+      - traefik.http.routers.traefik-dashboard-http.middlewares=https-redirect
+      # admin-auth middleware with HTTP Basic auth
+      # Using the environment variables USERNAME and HASHED_PASSWORD
+      - traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_USERNAME}:${TRAEFIK_HASHED_PASSWORD}
+      # Enable HTTP Basic auth, using the middleware created above
+      - traefik.http.routers.traefik-dashboard-https.middlewares=admin-auth
+    volumes:
+      # Add Docker as a mounted volume, so that Traefik can read the labels of other services
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount the volume to store the certificates
+      - server-traefik-certificates:/certificates
+    command:
+      # Enable Docker in Traefik, so that it reads labels from Docker services
+      - --providers.docker
+      # Do not expose all Docker services, only the ones explicitly exposed
+      - --providers.docker.exposedbydefault=false
+      # Create an entrypoint "http" listening on port 80
+      - --entrypoints.http.address=:80
+      # Create an entrypoint "https" listening on port 443
+      - --entrypoints.https.address=:443
+      # Create the certificate resolver "le" for Let's Encrypt, uses the environment variable EMAIL
+      - --certificatesresolvers.le.acme.email=${EMAIL}
+      # Store the Let's Encrypt certificates in the mounted volume
+      - --certificatesresolvers.le.acme.storage=/certificates/acme.json
+      # Use the TLS Challenge for Let's Encrypt
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      # Enable the access log, with HTTP requests
+      - --accesslog
+      # Enable the Traefik log, for configurations and errors
+      - --log
+      # Enable the Dashboard and API
+      - --api
+    networks:
+      # Use the public network created to be shared between Traefik and
+      # any other service that needs to be publicly available with HTTPS
+      - public-traefik
+
+  server-db:
+    image: postgres:17
+    restart: always
+    networks:
+      - local-backweb
+      - local-adminer
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+      timeout: 10s
+    volumes:
+      - server-pgdata:/var/lib/postgresql/data/pgdata
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
+      - POSTGRES_USER=${POSTGRES_USER?Variable not set}
+      - POSTGRES_DB=${POSTGRES_DB?Variable not set}
+
+  adminer:
+    image: adminer
+    restart: always
+    pull_policy: always
+    networks:
+      - public-traefik
+      - local-adminer
+    environment:
+      - ADMINER_DESIGN=pepa-linha-dark
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=public-traefik
+      - traefik.constraint-label=public-traefik
+      - traefik.http.routers.adminer-http.rule=Host(`adminer.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.adminer-http.entrypoints=http
+      # - traefik.http.routers.adminer-http.middlewares=https-redirect
+      - traefik.http.routers.adminer-https.rule=Host(`adminer.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.adminer-https.entrypoints=https
+      - traefik.http.routers.adminer-https.tls=true
+      - traefik.http.routers.adminer-https.tls.certresolver=le
+      - traefik.http.services.adminer.loadbalancer.server.port=8080
+
+  backweb:
+    image: eduardolat/pgbackweb:latest
+    restart: always
+    volumes:
+      - server-backups:/backups
+    environment:
+      PBW_ENCRYPTION_KEY: "${BACKWEB_SECRET_KEY?Variable not set}"
+      PBW_POSTGRES_CONN_STRING: "postgresql://${POSTGRES_USER?Variable not set}:${POSTGRES_PASSWORD?Variable not set}@server-db:5432/${POSTGRES_DB?Variable not set}?sslmode=disable"
+    networks:
+      - public-traefik
+      - local-backweb
+    depends_on:
+      server-db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=public-traefik
+      - traefik.constraint-label=public-traefik
+      - traefik.http.routers.backweb-http.rule=Host(`backweb.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.backweb-http.entrypoints=http
+      - traefik.http.routers.backweb-http.middlewares=https-redirect
+      - traefik.http.routers.backweb-https.rule=Host(`backweb.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.backweb-https.entrypoints=https
+      - traefik.http.routers.backweb-https.tls=true
+      - traefik.http.routers.backweb-https.tls.certresolver=le
+      - traefik.http.services.backweb.loadbalancer.server.port=8085
