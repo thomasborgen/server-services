@@ -1,17 +1,29 @@
 # Basic server services in a docker compose
 
-> This is just a file for me to have a traefik, adminer, backweb docker compose file that i can copy to my server
-> and run docker compose up -d and then have other docker containers register their subdomains to and allow them
+> This is a file for me to have a traefik, adminer, backweb docker compose file that i can copy to my server
+> and run `docker compose up -d` and then have other docker containers register their subdomains to and allow them
 > to be setup for backup through the same backweb service and look at the data through the same adminer service.
 
 ## TLDR
 
 1. Rename .env.example to .env and fill out env variables with your own.
-2. prod: `docker compose -f docker-compose.yml up -d`
-2. dev: `docker compose up -d`
-3. Add network `public-traefik` and labels to services you want to expose
-4. Add network `local-backweb` for databases that backweb should reach for backup
-5. Add network `local-adminer` for databases that adminer should reach
+
+2. Create networks for docker
+
+```sh
+docker network create public-traefik
+docker network create local-backweb
+docker network create local-adminer
+```
+
+
+3. Run the containers
+    * prod: `docker compose -f docker-compose.yml up -d`
+    * dev: `docker compose up -d`
+4. Add networks to your services in your projects docker compose file.
+    * `public-traefik` and labels to services you want to expose
+    * `local-backweb` for databases that backweb should reach for backup
+    * `local-adminer` for databases that adminer should reach
 
 
 ## Services available:
